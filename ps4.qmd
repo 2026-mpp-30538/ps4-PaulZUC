@@ -1,0 +1,487 @@
+---
+title: "PS4 Submission"
+author: "Paul Zee-Cheng"
+date: "2/7/2026"
+format: 
+  pdf:
+    include-in-header: 
+       text: |
+         \usepackage{fvextra}
+         \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
+include-before-body:
+  text: |
+    \RecustomVerbatimEnvironment{verbatim}{Verbatim}{
+      showspaces = false,
+      showtabs = false,
+      breaksymbolleft={},
+      breaklines
+    }
+output:
+  echo: false
+  eval: false
+---
+
+**Due 02/07 at 5:00PM Central.**
+
+"This submission is my work alone and complies with the 30538 integrity policy." Add your initials to indicate your agreement: \*\*\_PAZ\_\*\*
+
+### Github Classroom Assignment Setup and Submission Instructions
+
+1.  **Accepting and Setting up the PS4 Assignment Repository**
+    -   Each student must individually accept the repository for the problem set from Github Classroom ("ps4") -- <https://classroom.github.com/a/hWhtcHqH>
+        -   You will be prompted to select your cnetid from the list in order to link your Github account to your cnetid.
+        -   If you can't find your cnetid in the link above, click "continue to next step" and accept the assignment, then add your name, cnetid, and Github account to this Google Sheet and we will manually link it: <https://rb.gy/9u7fb6>
+    -   If you authenticated and linked your Github account to your device, you should be able to clone your PS4 assignment repository locally.
+    -   Contents of PS4 assignment repository:
+        -   `ps4_template.qmd`: this is the Quarto file with the template for the problem set. You will write your answers to the problem set here.
+2.  **Submission Process**:
+    -   Knit your completed solution `ps4.qmd` as a pdf `ps4.pdf`.
+        -   Your submission does not need runnable code. Instead, you will tell us either what code you ran or what output you got.
+    -   To submit, push `ps4.qmd` and `ps4.pdf` to your PS4 assignment repository. Confirm on Github.com that your work was successfully pushed.
+
+### Grading
+- You will be graded on what was last pushed to your PS4 assignment repository before the assignment deadline
+- Problem sets will be graded for completion as: {missing (0%); ✓- (incomplete, 50%); ✓+ (excellent, 100%)}
+    - The percent values assigned to each problem denote how long we estimate the problem will take as a share of total time spent on the problem set, not the points they are associated with.
+- In order for your submission to be considered complete, you need to push both your `ps4.qmd` and `ps4.pdf` to your repository. Submissions that do not include both files will automatically receive 50% credit.
+
+
+\newpage
+
+```{python}
+import pandas as pd
+import altair as alt
+import time
+
+import warnings 
+warnings.filterwarnings('ignore')
+alt.renderers.enable("png")
+```
+
+
+## Step 1: Develop initial scraper and crawler
+
+```{python}
+# import additional scraping & parsing libraries
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
+from datetime import datetime
+```
+
+```{python}
+BASE_URL = "https://oig.hhs.gov"
+TARGET_URL = "https://oig.hhs.gov/fraud/enforcement/"
+
+headers = {
+    "User-Agent": "Mozilla/5.0 (compatible; OIG-Enforcement-Scraper/1.0)"
+}
+
+response = requests.get(TARGET_URL, headers=headers)
+response.raise_for_status()
+
+soup = BeautifulSoup(response.text, "html.parser")
+
+results = []
+
+cards = soup.select("ul.usa-card-group > li.usa-card")
+for card in cards:
+    title = None
+    date = None
+    category = None
+    links = []
+
+    header = card.select_one("header.usa-card__header")
+    if not header:
+        continue
+
+    # ---- Title ----
+    title_tag = header.select_one("h2.usa-card__heading a")
+    if title_tag:
+        title = title_tag.get_text(strip=True)
+        links.append(urljoin(BASE_URL, title_tag["href"]))
+
+    # ---- Date ----
+    date_tag = header.select_one("div.font-body-sm")
+    if date_tag:
+        date = next(date_tag.stripped_strings, None)
+    # ---- Category ----
+    category_tag = header.select_one(
+        "ul.display-inline.add-list-reset li"
+    )
+    if category_tag:
+        category = category_tag.get_text(strip=True)
+
+    # ---- Collect all links ----
+    for a in card.select("a[href]"):
+        full_url = urljoin(BASE_URL, a["href"])
+        if full_url not in links:
+            links.append(full_url)
+
+    if title:
+        results.append({
+            "title": title,
+            "date": date,
+            "category": category,
+            "links": links
+        })
+
+print(f"Scraped {len(results)} enforcement actions")
+print(results[0])
+
+```
+
+```{python}
+# Convert results to a pandas DataFrame
+df = pd.DataFrame(results)
+df.head()
+print(df)
+```
+
+
+## Step 2: Making the scraper dynamic
+
+### 1. Turning the scraper into a function 
+
+* a. Pseudo-Code
+
+1. Define a function scrape_enforcement_actions(start_year, start_month, run_scraper)
+2. If run_scraper is False, print a message and exit the function
+3. If start_year < 2013, print a warning and exit the function
+4. Initialize: A. empty list to store scraped records. B. Page counter = 0
+5. While True: A. Construct page URL using ?page={page}. B. Request page and parse HTML. C. Extract all enforcement action cards and D. If no cards are found, break loop.
+6. For each card in the page: A. Extract title, date, category, link. B. Convert date to datetime C. If date < start_year/start_month, stop scraping entirely D. Otherwise, append record to list
+7. When no more cards are found and loop break, THEN Increment page counter and sleep(1) before loading next page
+8. Convert results list to DataFrame
+9. Save DataFrame as enforcement_actions_{year}_{month}.csv
+10. Return DataFrame
+
+* b. Create Dynamic Scraper
+
+```{python}
+# redefine variables for a dynamic scraper
+START_URL = "https://oig.hhs.gov/fraud/enforcement/"
+
+#Create code 
+def scrape_enforcement_actions(start_year, start_month, run_scraper=False):
+    """
+    Scrape HHS OIG enforcement actions starting from a given month/year.
+    """
+
+    # ---- Indicator to prevent re-running during knit ----
+    if not run_scraper:
+        print("run_scraper is False — skipping scraping.")
+        return None
+
+    # ---- Year validation ----
+    if start_year < 2013:
+        print("Please restrict scraping to year >= 2013.")
+        return None
+
+    start_date = datetime(start_year, start_month, 1)
+
+    # ----- Initialize, create empty list ----
+    records = []
+    page = 0
+    headers = {
+        "User-Agent": "Mozilla/5.0 (PS4-Enforcement-Scraper)"
+    }
+    
+    while True:
+        # Psuedocode Step 5:
+        # Construct page URL
+        url = f"{START_URL}?page={page}"
+
+        # request page and convert to soup
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # Extract enforcement action cards
+        cards = soup.select("ul.usa-card-group > li.usa-card")
+
+        # Break loop if no cards found
+        if not cards:
+            break
+
+        stop_scraping = False
+
+        # For each card, extract details
+        for card in cards:
+            header = card.select_one("header.usa-card__header")
+            if not header:
+                continue
+
+            # ---- Title ----
+            title_tag = header.select_one("h2.usa-card__heading a")
+            if not title_tag:
+                continue
+
+            title = title_tag.get_text(strip=True)
+            link = urljoin(BASE_URL, title_tag["href"])
+
+            # ---- Date (first text node only) ----
+            date_tag = header.select_one("div.font-body-sm")
+            if not date_tag:
+                continue
+
+            # Convert date to datetime
+            date_str = next(date_tag.stripped_strings, None)
+            date_dt = datetime.strptime(date_str, "%B %d, %Y")
+
+            # If date to early, stop scraping entirely
+            if date_dt < start_date:
+                stop_scraping = True
+                break
+
+            # ---- Category ----
+            categories = [
+                li.get_text(strip=True)
+                for li in header.select(
+                    "ul.display-inline.add-list-reset li"
+                )
+            ]
+
+            # Append record to list
+            records.append({
+                "title": title,
+                "date": date_dt.strftime("%Y-%m-%d"),
+                "category": categories,
+                "link": link
+            })
+
+        if stop_scraping:
+            break
+
+        # Increment page counter
+        page += 1
+
+        # Sleep before loading so we don't get locked out
+        time.sleep(1)
+
+    # convert to dataframe
+    df = pd.DataFrame(records)
+
+    #save dataframe
+    filename = f"enforcement_actions_{start_year}_{start_month}.csv"
+    df.to_csv(filename, index=False)
+    print(f"Saved {len(df)} enforcement actions to {filename}")
+
+    #return df
+    return df
+```
+
+* c. Test Your Code
+
+```{python}
+# While testing code, run_scraper=True. Else, set to false.
+df_2024 = scrape_enforcement_actions(
+    start_year=2024,
+    start_month=1,
+    run_scraper=False
+)
+```
+
+```{python}
+# Check results
+print(df_2024)
+# HOLY FUCK IT WORKED
+# (this section will appear blank while rendering in quarto, because test code is set to false)
+```
+
+Per the csv generated file, the total number is 1,807. The earliest date is 1/3/2024, about a former nurse aid. \newline
+
+Now to test code from Jan 2022:
+
+```{python}
+# PULL DATASET TO GRAPH
+
+# While testing code, run_scraper=True. Else, set to false.
+df_2022 = scrape_enforcement_actions(
+    start_year=2022,
+    start_month=1,
+    run_scraper=False
+)
+```
+
+Per the csv generated, this made 3,397 enforcement actions. The date and details of the earliest action are: 1/4/2022; fraud self disclosures; about the integrated pain management group..
+
+## Step 3: Plot data based on scraped data
+
+```{python}
+# Import additional graphing and stats libraries
+import re
+import numpy as np
+import vl_convert as vlc
+from altair_saver import save
+import selenium
+
+# WHY DOESNT PNG WORK TO ENABLE GRAPHS
+alt.renderers.enable('default')
+```
+
+```{python}
+# read in newly created csv
+df = pd.read_csv('enforcement_actions_2022_1.csv')
+
+# Preprocess data
+
+# Convert date to datetime
+df['date'] = pd.to_datetime(df['date'])
+
+# Create month-year column for aggregation
+df['month_year'] = df['date'].dt.to_period('M').astype(str)
+
+# Extract year and month separately for better sorting
+df['year'] = df['date'].dt.year
+df['month'] = df['date'].dt.month
+
+# Create a proper datetime for the start of each month for plotting
+df['month_date'] = df['date'].dt.to_period('M').dt.to_timestamp()
+
+df.head()
+```
+
+### 1. Plot the number of enforcement actions over time
+
+```{python}
+# Aggregate overall counts by month
+overall_counts = df.groupby(['month_date', 'year', 'month']).size().reset_index(name='count')
+overall_counts = overall_counts.sort_values(['year', 'month'])
+print(overall_counts)
+```
+
+```{python}
+# Graph actions over time
+chart1 = alt.Chart(overall_counts).mark_line(point=True).encode(
+    x=alt.X('month_date:T', title='Month'),
+    y=alt.Y('count:Q', title='Number of Enforcement Actions'),
+    tooltip=['month_date:T', 'count:Q']
+).properties(
+    title='Overall Enforcement Actions Over Time (Monthly)',
+    width=700,
+    height=400
+).configure_axis(
+    labelAngle=45
+)
+
+save(chart1, 'EAOT.html')
+```
+\begin{figure}[hbt!]
+  \includegraphics[width=\linewidth]{EAOT.png}
+  \caption{Enforcement Actions Over Time.}
+  \label{fig:EAOTLine}
+\end{figure}
+Figure \ref{fig:EAOTLine} shows the actions over time.
+
+### 2. Plot the number of enforcement actions categorized:
+
+* based on "Criminal and Civil Actions" vs. "State Enforcement Agencies"
+
+```{python}
+# First, split up categories
+def categorize_action(category_str):
+    if isinstance(category_str, str):
+        if "'Criminal and Civil Actions'" in category_str or '"Criminal and Civil Actions"' in category_str:
+            return 'Criminal and Civil Actions'
+        elif "'State Enforcement Agencies'" in category_str or '"State Enforcement Agencies"' in category_str:
+            return 'State Enforcement Agencies'
+    return 'Other Categories'
+
+# Add these categories to the dataframe
+df['main_category'] = df['category'].apply(categorize_action)
+
+# Create group dataset to chart
+category_counts = df.groupby(['month_date', 'main_category']).size().reset_index(name='count')
+category_counts = category_counts.sort_values(['month_date', 'main_category'])
+```
+
+```{python}
+# Create graph of criminal/civil v state
+
+chart2 = alt.Chart(category_counts).mark_line(point=True).encode(
+    x=alt.X('month_date:T', title='Month'),
+    y=alt.Y('count:Q', title='Number of Enforcement Actions'),
+    color=alt.Color('main_category:N', 
+                   legend=alt.Legend(title='Category')),
+    tooltip=['month_date:T', 'main_category:N', 'count:Q']
+).properties(
+    title='Enforcement Actions by Main Category (Monthly)',
+    width=600,
+    height=300
+).configure_axis(
+    labelAngle=45
+)
+
+
+save(chart2, 'EABC.html')
+```
+
+\begin{figure}[hbt!]
+  \includegraphics[width=\linewidth]{EABC.png}
+  \caption{Enforcement Actions by Category.}
+  \label{fig:EABCLine}
+\end{figure}
+Figure \ref{fig:EABCLine} shows the different categories of actions over time.
+
+
+* based on five topics
+
+```{python}
+# Create a new column for the five topics based on keyword matching
+criminal_df = df[df['main_category'] == 'Criminal and Civil Actions'].copy()
+
+# Create a series of criminal categoreis:
+def classify_criminal_action(title):
+    title_lower = str(title).lower()
+    
+    # Expanded keyword matching
+    if any(word in title_lower for word in ['opioid', 'oxycodone', 'controlled substance', 'drug', 
+                                           'prescription', 'fentanyl', 'morphine', 'adderall']):
+        return 'Drug Enforcement'
+    elif any(word in title_lower for word in ['money laundering', 'wire fraud', 'financial', 
+                                             'tax fraud', 'identity theft', 'embezzl', 'ponzi']):
+        return 'Financial Fraud'
+    elif any(word in title_lower for word in ['bribery', 'kickback', 'corruption', 'remuneration']):
+        return 'Bribery/Corruption'
+    elif any(word in title_lower for word in ['health care fraud', 'medicare fraud', 'medicaid fraud',
+                                             'false claims', 'defraud medicare', 'defraud medicaid']):
+        return 'Health Care Fraud'
+    else:
+        return 'Other'
+
+# Apply classification system
+criminal_df['criminal_subcategory'] = criminal_df['title'].apply(classify_criminal_action)
+
+# Create a graphable subdivided dataframe
+criminal_counts = criminal_df.groupby(['month_date', 'criminal_subcategory']).size().reset_index(name='count')
+criminal_counts = criminal_counts.sort_values(['month_date', 'criminal_subcategory'])
+
+print(criminal_counts)
+```
+
+```{python}
+# Create graph of criminal categories over time
+chart3 = alt.Chart(criminal_counts).mark_line(point=True).encode(
+    x=alt.X('month_date:T', title='Month'),
+    y=alt.Y('count:Q', title='Number of Enforcement Actions'),
+    color=alt.Color('criminal_subcategory:N',
+                   legend=alt.Legend(title='Criminal Subcategory')),
+    tooltip=['month_date:T', 'criminal_subcategory:N', 'count:Q']
+).properties(
+    title='Criminal and Civil Actions: Breakdown by Subcategory (Monthly)',
+    width=600,
+    height=300
+).configure_axis(
+    labelAngle=45
+)
+
+save(chart3, 'EA5T.html')
+```
+
+\begin{figure}[hbt!]
+  \includegraphics[width=\linewidth]{EA5T.png}
+  \caption{Enforcement Actions divided by Criminal Subcategory.}
+  \label{fig:EA5TLine}
+\end{figure}
+Figure \ref{fig:EA5TLine} shows the criminal subcategories of enforcement actions over time.
